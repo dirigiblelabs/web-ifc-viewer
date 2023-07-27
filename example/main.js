@@ -1,7 +1,7 @@
 import { CameraProjections, IfcViewerAPI } from 'web-ifc-viewer';
 import { createSideMenuButton } from './utils/gui-creator';
 import {
-  IFCSPACE, IFCOPENINGELEMENT, IFCFURNISHINGELEMENT, IFCWALL, IFCWINDOW, IFCCURTAINWALL, IFCMEMBER, IFCPLATE
+  IFCSPACE, IFCOPENINGELEMENT, IFCFURNISHINGELEMENT, IFCWALL, IFCWALLSTANDARDCASE, IFCSLAB, IFCWINDOW, IFCCURTAINWALL, IFCMEMBER, IFCPLATE
 } from 'web-ifc';
 import {
   MeshBasicMaterial,
@@ -11,11 +11,105 @@ import {
   DepthTexture,
   WebGLRenderTarget, Material, BufferGeometry, BufferAttribute, Mesh
 } from 'three';
+import {
+  computeBoundsTree,
+  disposeBoundsTree,
+  acceleratedRaycast,
+} from "three-mesh-bvh";
 import { ClippingEdges } from 'web-ifc-viewer/dist/components/display/clipping-planes/clipping-edges';
 import Stats from 'stats.js/src/Stats';
+import { MeshLambertMaterial, MeshNormalMaterial } from "three";
 
 const container = document.getElementById('viewer-container');
 const viewer = new IfcViewerAPI({ container, backgroundColor: new Color(255, 255, 255) });
+window.modelIds = [];
+window.models = [];
+
+// CUSTOM!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+window.viewer = viewer;
+window.ifc = viewer.IFC.loader.ifcManager;
+console.log("IVO!!: Viewer set to window");
+// optimized for picking
+window.ifc.setupThreeMeshBVH(
+  computeBoundsTree,
+  disposeBoundsTree,
+  acceleratedRaycast);
+
+window.getAllWallsProperties = async function() {
+  const slabsID = await viewer.IFC.getAllItemsOfType(0, IFCWALL);
+  console.log('All walls:');
+  for (let i = 0; i <= slabsID.length; i++) {
+    const slabID = slabsID[i];
+    const slabProperties = await window.ifc.getItemProperties(0, slabID, true);
+    console.log('slab properties[' + i + ']:');
+    console.log(JSON.stringify(slabProperties));
+  }
+};
+
+window.getModelIds = function() {
+  return window.modelIds;
+}
+
+window.getAllIdsOfType = async function(modelID, type) {
+  return await viewer.IFC.getAllItemsOfType(modelID, type);
+}
+
+async function getAll(category) {
+  return window.ifc.getAllItemsOfType(0, category, false);
+}
+
+window.getAllPropertiesForId = async function(modelID) {
+  return await window.ifc.getItemProperties(modelID, id, true);
+}
+
+window.greenMaterial = new MeshLambertMaterial({
+  transparent: true,
+  opacity: 0.6,
+  color: 0x00ff00,
+  depthTest: false,
+});
+
+window.createMaterial = function (color, opacity) {
+  return new MeshLambertMaterial({
+    transparent: true,
+    opacity: opacity,
+    color: color,
+    depthTest: false,
+  })
+}
+
+window.setItemsColor = function(modelID, ids, material) {
+  window.ifc.createSubset({
+    modelID: modelID,
+    ids: ids,
+    material: material,
+    scene: viewer.context.getScene()
+  });
+}
+
+window.setItemColor = function(modelID, id, material) {
+  window.setItemsColor(modelID, [id], material);
+}
+
+const subsets = []
+window.newSubsetOfType = async function(category) {
+  const ids = await getAll(category);
+  console.log(JSON.stringify(ids));
+  const subset = window.ifc.createSubset({
+    modelID: 0,
+    scene: viewer.context.getScene(),
+    ids,
+    removePrevious: true,
+    customID: category.toString(),
+  });
+  subsets.push(subset);
+  viewer.context.getScene().add(subset);
+  window.models[0].visible = false;
+  return subset;
+}
+
+// CUSTOM!!!!!!!!!!!!!!!!!!!!!!!!!!!! </>
+
 viewer.axes.setAxes();
 viewer.grid.setGrid();
 // viewer.shadowDropper.darkness = 1.5;
@@ -159,6 +253,9 @@ const loadIfc = async (event) => {
   });
 
   model = await viewer.IFC.loadIfc(selectedFile, false);
+  console.log('Loaded: ' + model.modelID);
+  window.models.push(model);
+  window.modelIds.push(model.modelID);
   // model.material.forEach(mat => mat.side = 2);
 
   if(first) first = false
@@ -207,9 +304,44 @@ window.ondblclick = async () => {
     if (!result) return;
     const { modelID, id } = result;
     const props = await viewer.IFC.getProperties(modelID, id, true, false);
+    console.log('clicked on item with id: ' + id + ' from modelId ' + modelID);
     console.log(props);
+    postToViewerHandlerJs(id, props);
   }
 };
+
+function postToViewerHandlerJs(id, data) {
+  const url = 'http://127.0.0.1:8080/services/js/IFC%20Viewer/viewer_handler.mjs';
+  const username = 'admin';
+  const password = 'admin';
+  
+  const authHeader = 'Basic ' + btoa(username + ':' + password);
+  
+  const requestData = {
+    id: id,
+    data: data
+  };
+
+  console.log('IVO!!: posting to handlerjs' + requestData);
+  
+  fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': authHeader,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(requestData)
+  })
+    .then(response => response.json())
+    .then(data => {
+      // Handle the response data
+      console.log('IVO!!: ' + data);
+    })
+    .catch(error => {
+      // Handle any errors
+      console.error('IVO!!: ' + error);
+    });
+}
 
 //Setup UI
 const loadButton = createSideMenuButton('./resources/folder-icon.svg');
@@ -229,3 +361,74 @@ dropBoxButton.addEventListener('click', () => {
   dropBoxButton.blur();
   viewer.dropbox.loadDropboxIfc();
 });
+
+// const showOnlyWallsButton = createSideMenuButton('./resources/dropbox-icon.svg');
+// var visibleSubsets = [];
+// showOnlyWallsButton.addEventListener('click', async () => {
+//   showOnlyWallsButton.blur();
+
+//   if(visibleSubsets.length === 0) {
+//       var ifcWallStandardCaseSubset = await newSubsetOfType(3512223829);
+//       var ifcBuildingElementPartSubset = await newSubsetOfType(2979338954);
+//       visibleSubsets.push(ifcWallStandardCaseSubset);
+//       visibleSubsets.push(ifcBuildingElementPartSubset);
+//       window.models[0].visible = false;
+//   }
+//   else {
+//     visibleSubsets.forEach((ss) => {
+//       window.ifc.subsets.removeSubset(ss.modelID, ss.material, ss.customID);
+//     });
+//     visibleSubsets = [];
+//     window.models[0].visible = true;
+//   }
+// });
+
+function createSideMenuButtoWithText(text){
+  const button = document.createElement('button');
+  button.classList.add('basic-button');
+
+  const p = document.createElement("p");
+  p.innerHTML = text;
+  p.classList.add('icon');
+  button.appendChild(p);
+
+  const sideMenu = document.getElementById('side-menu-left');
+  sideMenu.appendChild(button);
+
+  return button;
+}
+
+window.buttonVisibleSubsets = new Map();
+window.createToggleButtonByTypes = function(types, text) {
+  const toggleButton = createSideMenuButtoWithText(text);
+
+  toggleButton.addEventListener('click', async () => {
+    toggleButton.blur();
+    
+    if(!window.buttonVisibleSubsets.has(toggleButton)) {
+      const visibleSubsets = [];
+      types.forEach(async (t) => {
+        const visibleSubset = await newSubsetOfType(t);
+        visibleSubsets.push(visibleSubset);
+      });
+      window.buttonVisibleSubsets.set(toggleButton, visibleSubsets);
+      window.models[0].visible = false;
+    }
+    else {
+      window.buttonVisibleSubsets.get(toggleButton).forEach((ss) => {
+        //window.ifc.subsets.removeSubset(ss.modelID, ss.material, ss.customID);
+        window.viewer.context.getScene().remove(ss);
+      });
+      window.buttonVisibleSubsets.delete(toggleButton);
+      window.models[0].visible = true;
+    }
+  });
+}
+
+function createButtonsForTyes() {
+  createToggleButtonByTypes([IFCWALL, IFCWALLSTANDARDCASE],"Walls");
+  createToggleButtonByTypes([IFCSLAB],"Slabs");
+  createToggleButtonByTypes([IFCWINDOW],"Windows");
+  // add more for happy ^^
+}
+createButtonsForTyes();
